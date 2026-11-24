@@ -1,5 +1,7 @@
 # MarketEye 👁
 
+MarketEye — Telegram bot for stock market analysis: prices, charts, news and AI-powered insights. Built with Python & aiogram.
+
 Telegram-бот для анализа акций (учебный проект).
 
 ## Запуск
