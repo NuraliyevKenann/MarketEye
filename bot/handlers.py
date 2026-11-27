@@ -5,15 +5,20 @@ from html import escape
 import aiohttp
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     BufferedInputFile,
     CallbackQuery,
+    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     Message,
 )
 
 from bot.texts import COMING_SOON, HELP_TEXT, START_TEXT
+from core.chart import make_chart
 from core.market import PERIODS, TickerNotFound, get_company, get_price_change
 
 router = Router()
@@ -21,6 +26,11 @@ log = logging.getLogger(__name__)
 
 # Запоминаем название и логотип компании, чтобы не скачивать заново при нажатии кнопок
 company_cache = {}
+
+
+class PriceForm(StatesGroup):
+    """Состояние «бот ждёт тикер от пользователя» (FSM — машина состояний)."""
+    waiting_ticker = State()
 
 
 @router.message(CommandStart())
@@ -85,15 +95,48 @@ def period_keyboard(ticker, selected):
 
 
 @router.message(Command("price"))
-async def price_cmd(message: Message, command: CommandObject):
-    # Тикер из команды: /price TSLA. Если не указан — AAPL
-    ticker = command.args.split()[0].upper() if command.args else "AAPL"
+async def price_cmd(message: Message, command: CommandObject, state: FSMContext):
+    # /price TSLA — тикер уже есть, сразу показываем цену
+    if command.args:
+        await send_price_card(message, command.args.split()[0].upper())
+        return
+
+    # /price без тикера — спрашиваем и ждём ответа
+    await state.set_state(PriceForm.waiting_ticker)
+    prompt = await message.answer(
+        "<b>TICKER:</b>",
+        reply_markup=ForceReply(input_field_placeholder="например AAPL"),
+    )
+    # Запоминаем id сообщения «TICKER:», чтобы потом его стереть
+    await state.update_data(prompt_id=prompt.message_id)
+
+
+@router.message(PriceForm.waiting_ticker, F.text, ~F.text.startswith("/"))
+async def price_ticker_entered(message: Message, state: FSMContext):
+    """Пользователь прислал тикер после «TICKER:»."""
+    data = await state.get_data()
+    await state.clear()  # больше не ждём тикер
+
+    # Стираем сообщение «TICKER:»
+    try:
+        await message.bot.delete_message(message.chat.id, data["prompt_id"])
+    except Exception:
+        pass  # уже удалено или слишком старое — не страшно
+
+    await send_price_card(message, message.text.split()[0].upper())
+
+
+async def send_price_card(message: Message, ticker: str):
+    """Собирает данные и отправляет карточку с ценой, логотипом и кнопками."""
     period = "1d"
 
     loading = await message.answer("⏳ Собираю данные…")
     try:
-        name, logo = await get_company_cached(ticker)
+        if len(ticker) > 12:  # таких длинных тикеров не бывает
+            raise TickerNotFound(ticker)
+        # Сначала цена: если тикера нет, дальше не идём
         price, change, change_pct = await asyncio.to_thread(get_price_change, ticker, period)
+        name, logo = await get_company_cached(ticker)
     except TickerNotFound:
         await loading.edit_text(f"❌ Не нашёл тикер <b>{escape(ticker)}</b>. Пример: /price AAPL")
         return
@@ -105,9 +148,11 @@ async def price_cmd(message: Message, command: CommandObject):
     text = price_text(name, ticker, period, price, change, change_pct)
     keyboard = period_keyboard(ticker, period)
 
-    if logo:
+    # Картинка карточки: график, а если он не построился — логотип
+    picture = await get_chart(ticker, period) or logo
+    if picture:
         await message.answer_photo(
-            BufferedInputFile(logo, filename=f"{ticker}.png"),
+            BufferedInputFile(picture, filename=f"{ticker}.png"),
             caption=text,
             reply_markup=keyboard,
         )
@@ -116,9 +161,18 @@ async def price_cmd(message: Message, command: CommandObject):
         await loading.edit_text(text, reply_markup=keyboard)
 
 
+async def get_chart(ticker, period):
+    """График из core/chart.py. Если не получилось — None (карточка всё равно придёт)."""
+    try:
+        return await asyncio.to_thread(make_chart, ticker, period)
+    except Exception:
+        log.exception("Не удалось построить график %s %s", ticker, period)
+        return None
+
+
 @router.callback_query(F.data.startswith("price:"))
 async def price_period(callback: CallbackQuery):
-    """Нажатие на кнопку периода."""
+    """Нажатие на кнопку периода: меняем и цифры, и график."""
     _, ticker, period = callback.data.split(":")
     await callback.answer("⏳ Собираю данные…")  # всплывающая подсказка сверху
 
@@ -132,11 +186,23 @@ async def price_period(callback: CallbackQuery):
     text = price_text(name, ticker, period, price, change, change_pct)
     keyboard = period_keyboard(ticker, period)
 
-    # Если сообщение с картинкой — меняем подпись, иначе — текст
-    if callback.message.photo:
-        await callback.message.edit_caption(caption=text, reply_markup=keyboard)
-    else:
+    if not callback.message.photo:
+        # Карточка без картинки — меняем только текст
         await callback.message.edit_text(text, reply_markup=keyboard)
+        return
+
+    chart = await get_chart(ticker, period)
+    if chart:
+        # Заменяем картинку на новый график вместе с подписью
+        await callback.message.edit_media(
+            InputMediaPhoto(
+                media=BufferedInputFile(chart, filename=f"{ticker}_{period}.png"),
+                caption=text,
+            ),
+            reply_markup=keyboard,
+        )
+    else:
+        await callback.message.edit_caption(caption=text, reply_markup=keyboard)
 
 
 # ---------- Заглушки ----------
