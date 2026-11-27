@@ -20,7 +20,7 @@ SHORT_DESCRIPTION = "Stock prices, charts, news and AI sentiment by ticker 📈"
 COMMANDS = {
     "start": "Приветствие",
     "help": "Список команд",
-    "price": "Цена акции, например /price AAPL (скоро)",
+    "price": "Цена акции",
     "overview": "О компании и ключевые метрики (скоро)",
     "sentiment": "Настроение рынка по новостям (скоро)",
     "thesis": "Инвест-идея от ИИ: за и против (скоро)",
@@ -51,7 +51,7 @@ START_TEXT = (
 HELP_TEXT = (
     "<b>Команды MarketEye</b>\n"
     "\n"
-    "/price &lt;тикер&gt; — цена и изменение за день <i>(скоро)</i>\n"
+    "/price &lt;тикер&gt; — цена и изменение за период\n"
     "/overview &lt;тикер&gt; — о компании и ключевые метрики <i>(скоро)</i>\n"
     "/sentiment &lt;тикер&gt; — настроение по новостям <i>(скоро)</i>\n"
     "/thesis &lt;тикер&gt; — инвест-идея от ИИ <i>(скоро)</i>\n"
