@@ -1,5 +1,6 @@
 from html import escape
 
+import yfinance as yf
 from aiogram import Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import Message
@@ -21,9 +22,17 @@ async def help_cmd(message: Message):
     await message.answer(HELP_TEXT)
 
 
+# /price — пока только для AAPL (код из playground.py)
+@router.message(Command("price"))
+async def price_cmd(message: Message):
+    ticker = yf.Ticker("AAPL")
+    history = ticker.history(period="5d")
+    last_price = history["Close"].iloc[-1]
+    await message.answer(f"Цена AAPL: {last_price}")
+
+
 # Заглушки: команды пока отвечают «в разработке».
-# TODO: заменить на свои обработчики, например @router.message(Command("price"))
-@router.message(Command("price", "overview", "sentiment", "thesis", "watchlist"))
+@router.message(Command("overview", "sentiment", "thesis", "watchlist"))
 async def coming_soon(message: Message, command: CommandObject):
     await message.answer(COMING_SOON.format(cmd=command.command))
 
