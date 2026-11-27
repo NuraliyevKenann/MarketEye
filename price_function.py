@@ -2,7 +2,7 @@ import yfinance as yf
 import matplotlib.pyplot as plt
 
 # Шаг 1. Тикер и период — в переменных. Меняешь здесь, меняется везде.
-symbol = ('AAPL','CENX')
+symbol = 'AAPL'
 period = '6mo'
 
 # Шаг 3. Словарь: код периода -> красивая подпись
