@@ -19,6 +19,7 @@ from aiogram.types import (
 
 from bot.texts import COMING_SOON, HELP_TEXT, START_TEXT
 from core.chart import make_chart
+from core.overview import get_overview
 from core.market import PERIODS, TickerNotFound, get_company, get_price_change
 
 router = Router()
@@ -102,17 +103,30 @@ async def price_cmd(message: Message, command: CommandObject, state: FSMContext)
         return
 
     # /price без тикера — спрашиваем и ждём ответа
+    await ask_ticker(message, state, cmd="price")
+
+
+@router.message(Command("overview"))
+async def overview_cmd(message: Message, command: CommandObject, state: FSMContext):
+    if command.args:
+        await send_overview(message, command.args.split()[0].upper())
+        return
+    await ask_ticker(message, state, cmd="overview")
+
+
+async def ask_ticker(message: Message, state: FSMContext, cmd: str):
+    """Отправляет «TICKER:» и запоминает, для какой команды ждём тикер."""
     await state.set_state(PriceForm.waiting_ticker)
     prompt = await message.answer(
         "<b>TICKER:</b>",
         reply_markup=ForceReply(input_field_placeholder="например AAPL"),
     )
-    # Запоминаем id сообщения «TICKER:», чтобы потом его стереть
-    await state.update_data(prompt_id=prompt.message_id)
+    # Запоминаем id сообщения «TICKER:» (чтобы стереть) и команду
+    await state.update_data(prompt_id=prompt.message_id, cmd=cmd)
 
 
 @router.message(PriceForm.waiting_ticker, F.text, ~F.text.startswith("/"))
-async def price_ticker_entered(message: Message, state: FSMContext):
+async def ticker_entered(message: Message, state: FSMContext):
     """Пользователь прислал тикер после «TICKER:»."""
     data = await state.get_data()
     await state.clear()  # больше не ждём тикер
@@ -123,7 +137,129 @@ async def price_ticker_entered(message: Message, state: FSMContext):
     except Exception:
         pass  # уже удалено или слишком старое — не страшно
 
-    await send_price_card(message, message.text.split()[0].upper())
+    ticker = message.text.split()[0].upper()
+    if data.get("cmd") == "overview":
+        await send_overview(message, ticker)
+    else:
+        await send_price_card(message, ticker)
+
+
+# ---------- /overview ----------
+
+RECOMMENDATIONS = {
+    "strong_buy": "Активно покупать 🟢🟢",
+    "buy": "Покупать 🟢",
+    "hold": "Держать 🟡",
+    "underperform": "Хуже рынка 🟠",
+    "sell": "Продавать 🔴",
+}
+
+
+COUNTRY_CODES = {
+    "United States": "US", "Canada": "CA", "United Kingdom": "GB", "Germany": "DE",
+    "France": "FR", "Netherlands": "NL", "Switzerland": "CH", "Ireland": "IE",
+    "Sweden": "SE", "Denmark": "DK", "Norway": "NO", "Finland": "FI", "Spain": "ES",
+    "Italy": "IT", "Belgium": "BE", "Luxembourg": "LU", "Japan": "JP", "China": "CN",
+    "Hong Kong": "HK", "Taiwan": "TW", "South Korea": "KR", "India": "IN",
+    "Singapore": "SG", "Australia": "AU", "Israel": "IL", "Brazil": "BR",
+    "Mexico": "MX", "Argentina": "AR", "Bermuda": "BM", "Cayman Islands": "KY",
+    "Uruguay": "UY", "Chile": "CL", "South Africa": "ZA", "Russia": "RU",
+    "Kazakhstan": "KZ", "Azerbaijan": "AZ", "Turkey": "TR", "Greece": "GR",
+}
+
+
+def flag(country):
+    """'United States' -> 🇺🇸. Флаг собирается из двух «букв-флагов» Unicode."""
+    code = COUNTRY_CODES.get(country)
+    if not code:
+        return "🌍"
+    return "".join(chr(0x1F1E6 + ord(letter) - ord("A")) for letter in code)
+
+
+def big_number(value):
+    """5210368901120 -> 5.21T"""
+    if value is None:
+        return "—"
+    for limit, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M")):
+        if abs(value) >= limit:
+            return f"{value / limit:.2f}{suffix}"
+    return f"{value:,.0f}"
+
+
+NO_DATA = "<i>нет данных</i>"
+
+
+def num(value, fmt="{:.2f}"):
+    """Число по шаблону или «нет данных»."""
+    return NO_DATA if value is None else fmt.format(value)
+
+
+def overview_text(ticker, o):
+    def esc(value):
+        return escape(value) if value else NO_DATA
+
+    target = num(o["target_price"], "${:.2f}")
+    # Насколько целевая цена выше/ниже текущей
+    if o["price"] and o["target_price"]:
+        target += f" ({(o['target_price'] / o['price'] - 1) * 100:+.1f}%)"
+
+    sections = [
+        # 1. Кто это
+        f"🏢 <b>{escape(o['name'])}</b> ({ticker})\n"
+        f"{flag(o['country'])} {esc(o['country'])}",
+
+        # 2. Профиль
+        "<b>📋 Профиль</b>\n"
+        f"Сектор: {esc(o['sector'])}\n"
+        f"Отрасль: {esc(o['industry'])}\n"
+        f"Сотрудники: {num(o['employees'], '{:,}')}",
+
+        # 3. Цена
+        "<b>💵 Цена</b>\n"
+        f"Сейчас: <b>{num(o['price'], '${:.2f}')}</b>\n"
+        f"Мин. за год: {num(o['low_52w'], '${:.2f}')}\n"
+        f"Макс. за год: {num(o['high_52w'], '${:.2f}')}",
+
+        # 4. Оценка
+        "<b>📊 Оценка</b>\n"
+        f"Капитализация: {NO_DATA if o['market_cap'] is None else '$' + big_number(o['market_cap'])}\n"
+        f"P/E: {num(o['pe'])}\n"
+        f"Прогнозный P/E: {num(o['forward_pe'])}\n"
+        f"Дивиденды: {num(o['dividend_yield'], '{:.2f}%')}",
+
+        # 5. Аналитики
+        "<b>🎯 Аналитики</b>\n"
+        f"Целевая цена: {target}\n"
+        f"Рекомендация: {RECOMMENDATIONS.get(o['recommendation'], NO_DATA)}",
+    ]
+    # Разделы отделяем пустой строкой
+    return "\n\n".join(sections)
+
+
+async def send_overview(message: Message, ticker: str):
+    """Собирает данные о компании (core/overview.py) и отправляет карточку."""
+    loading = await message.answer("⏳ Собираю данные…")
+    try:
+        if len(ticker) > 12:
+            raise TickerNotFound(ticker)
+        o = await asyncio.to_thread(get_overview, ticker)
+        if not o.get("name"):  # для несуществующего тикера Yahoo не даёт название
+            raise TickerNotFound(ticker)
+        _name, logo = await get_company_cached(ticker)
+    except TickerNotFound:
+        await loading.edit_text(f"❌ Не нашёл тикер <b>{escape(ticker)}</b>. Пример: /overview AAPL")
+        return
+    except Exception:
+        log.exception("Ошибка /overview %s", ticker)
+        await loading.edit_text("⚠️ Не удалось получить данные. Попробуй позже.")
+        return
+
+    text = overview_text(ticker, o)
+    if logo:
+        await message.answer_photo(BufferedInputFile(logo, filename=f"{ticker}.png"), caption=text)
+        await loading.delete()
+    else:
+        await loading.edit_text(text)
 
 
 async def send_price_card(message: Message, ticker: str):
@@ -149,7 +285,7 @@ async def send_price_card(message: Message, ticker: str):
     keyboard = period_keyboard(ticker, period)
 
     # Картинка карточки: график, а если он не построился — логотип
-    picture = await get_chart(ticker, period) or logo
+    picture = await get_chart(ticker, period, logo) or logo
     if picture:
         await message.answer_photo(
             BufferedInputFile(picture, filename=f"{ticker}.png"),
@@ -161,10 +297,10 @@ async def send_price_card(message: Message, ticker: str):
         await loading.edit_text(text, reply_markup=keyboard)
 
 
-async def get_chart(ticker, period):
+async def get_chart(ticker, period, logo=None):
     """График из core/chart.py. Если не получилось — None (карточка всё равно придёт)."""
     try:
-        return await asyncio.to_thread(make_chart, ticker, period)
+        return await asyncio.to_thread(make_chart, ticker, period, logo)
     except Exception:
         log.exception("Не удалось построить график %s %s", ticker, period)
         return None
@@ -177,7 +313,7 @@ async def price_period(callback: CallbackQuery):
     await callback.answer("⏳ Собираю данные…")  # всплывающая подсказка сверху
 
     try:
-        name, _logo = await get_company_cached(ticker)
+        name, logo = await get_company_cached(ticker)
         price, change, change_pct = await asyncio.to_thread(get_price_change, ticker, period)
     except Exception:
         log.exception("Ошибка кнопки периода %s %s", ticker, period)
@@ -191,7 +327,7 @@ async def price_period(callback: CallbackQuery):
         await callback.message.edit_text(text, reply_markup=keyboard)
         return
 
-    chart = await get_chart(ticker, period)
+    chart = await get_chart(ticker, period, logo)
     if chart:
         # Заменяем картинку на новый график вместе с подписью
         await callback.message.edit_media(
@@ -208,7 +344,7 @@ async def price_period(callback: CallbackQuery):
 # ---------- Заглушки ----------
 
 # Команды пока отвечают «в разработке».
-@router.message(Command("overview", "sentiment", "thesis", "watchlist"))
+@router.message(Command("sentiment", "thesis", "watchlist"))
 async def coming_soon(message: Message, command: CommandObject):
     await message.answer(COMING_SOON.format(cmd=command.command))
 
